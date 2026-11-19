@@ -252,6 +252,55 @@ def test_film_merges_still_frames_and_fits_budget():
     assert len(film.keep_changed(many)) == film.MAX_FRAMES
 
 
+def test_a_connection_bluetoothd_hands_over_holds_and_closes(monkeypatch):
+    # bluetoothd passes each accepted HID channel on non-blocking and keeps its own copy.
+    import pytest
+    d = pytest.importorskip("phoneuse.hid_daemon")  # Linux only (fcntl, termios, GLib)
+    import fcntl
+    import socket
+    import threading
+    import time
+    monkeypatch.setattr(d, "log", lambda *a: None)
+    monkeypatch.setattr(d, "reconnect_now", threading.Event())
+    monkeypatch.setattr(d, "hid", d.HID())
+    phone, kept = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    fcntl.fcntl(kept.fileno(), fcntl.F_SETFL, fcntl.fcntl(kept.fileno(), fcntl.F_GETFL) | os.O_NONBLOCK)
+    ctrl = d.HandedOver(fileno=os.dup(kept.fileno()))  # what NewConnection gets over D-Bus
+    d.hid.ctrl, d.hid.intr = ctrl, socket.socket()
+    threading.Thread(target=d.handle_ctrl, args=(ctrl,), daemon=True).start()
+    time.sleep(0.2)
+    assert d.hid.ctrl is ctrl  # the reader waits for the phone instead of dropping the link
+    phone.send(b"\x71")  # SET_PROTOCOL
+    phone.settimeout(1)
+    assert phone.recv(64) == b"\x00"
+    d.hid.drop("test")
+    assert phone.recv(64) == b""  # the phone sees the channel close, though bluetoothd's copy is open
+    kept.close()
+
+
+def test_a_phone_that_stops_mirroring_loses_its_whole_link(monkeypatch):
+    # An iPhone refuses new HID connections on a Bluetooth link that stayed up.
+    import pytest
+    d = pytest.importorskip("phoneuse.hid_daemon")
+    import socket
+    import threading
+    names = {"AA:BB:CC:DD:EE:01": "Phone A", "AA:BB:CC:DD:EE:02": "Phone B"}
+    monkeypatch.setattr(d, "log", lambda *a: None)
+    monkeypatch.setattr(d, "save_state", lambda: None)
+    monkeypatch.setattr(d, "paired_devices", lambda: list(names))
+    monkeypatch.setattr(d, "device_name", names.get)
+    monkeypatch.setattr(d, "reconnect_now", threading.Event())
+    monkeypatch.setattr(d, "mirror_name", ["Phone A"])
+    monkeypatch.setattr(d, "hid", d.HID())
+    gone = []
+    monkeypatch.setattr(d, "disconnect", gone.append)
+    d.hid.ctrl, d.hid.intr, d.hid.peer = socket.socket(), socket.socket(), "AA:BB:CC:DD:EE:01"
+    d.set_mirror("Phone A")  # the same phone: nothing changes
+    assert d.hid.connected and gone == []
+    d.set_mirror("Phone B")
+    assert not d.hid.connected and gone == ["AA:BB:CC:DD:EE:01"]
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in list(globals().items()):
