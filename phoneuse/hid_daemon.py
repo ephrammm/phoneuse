@@ -167,12 +167,14 @@ class HID:
 
     def drop(self, why):
         log("disconnect:", why)
-        for s in (self.intr, self.ctrl):
+        # Detach first: closing a handed-over channel wakes its reader (HandedOver), and the
+        # reader must then fail its "still our channel?" check, not drop a replacement too.
+        socks, self.ctrl, self.intr = (self.intr, self.ctrl), None, None
+        for s in socks:
             try:
                 s and s.close()
             except OSError:
                 pass
-        self.ctrl = self.intr = None
         reconnect_now.set()
 
     # mouse
